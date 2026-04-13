@@ -11,7 +11,7 @@ version = "1.0.0"
 
 [[services]]
 name = "web"
-paths = [ "/" ]
+paths = ["/"]
 localPort = 19585
 
 [services.development]
@@ -20,3 +20,7 @@ run = "pnpm --filter @workspace/proxy-ui run dev"
 [services.env]
 PORT = "19585"
 BASE_PATH = "/"
+
+[services.production]
+publicDir = "artifacts/proxy-ui/dist/public"
+serve = "static"
