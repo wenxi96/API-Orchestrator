@@ -78,20 +78,22 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
 
   try {
     if (stream) {
-      const events = await withRetry(async () => {
-        const s = anthropic.messages.stream(
-          baseParams as Parameters<typeof anthropic.messages.stream>[0],
+      // Use create({stream:true}) — the Replit AI Integration's stream helper
+      // objects don't expose initialMessage(), so we use the create() API instead.
+      // Wrapping just the create() call in withRetry means we can still retry
+      // transient auth/503/429 errors before any response headers are sent.
+      const eventStream = await withRetry(() =>
+        anthropic.messages.create(
+          { ...baseParams, stream: true } as Parameters<typeof anthropic.messages.create>[0],
           requestOptions,
-        );
-        await s.initialMessage();
-        return s;
-      });
+        )
+      );
 
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
 
-      for await (const event of events) {
+      for await (const event of (eventStream as AsyncIterable<{ type: string }>)) {
         res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
       }
       res.end();
