@@ -12,8 +12,10 @@ paths = ["/"]
 [services.development]
 run = "pnpm --filter @workspace/api-server run dev"
 
+[services.production]
+
 [services.production.build]
-args = ["sh", "scripts/build-production.sh"]
+args = ["pnpm", "--filter", "@workspace/api-server", "--filter", "@workspace/proxy-ui", "run", "build"]
 
 [services.production.build.env]
 NODE_ENV = "production"
