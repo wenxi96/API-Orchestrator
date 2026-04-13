@@ -75,7 +75,7 @@ function LiveTester() {
     try {
       const res = await fetch(`${BASE}/api/v1/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+        headers: { "Content-Type": "application/json", "x-api-key": apiKey },
         body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], stream: true }),
         signal: abortRef.current.signal,
       });
@@ -175,8 +175,9 @@ export default function App() {
   const openaiCode = `import OpenAI from "openai";
 
 const client = new OpenAI({
-  apiKey: "YOUR_PROXY_API_KEY",
+  apiKey: "unused",
   baseURL: "${baseUrl}",
+  defaultHeaders: { "x-api-key": "YOUR_PROXY_API_KEY" },
 });
 
 // GPT model
@@ -214,13 +215,13 @@ const gpt = await client.messages.create({
 
   const curlCode = `# OpenAI format
 curl -X POST ${baseUrl}/chat/completions \\
-  -H "Authorization: Bearer YOUR_PROXY_API_KEY" \\
+  -H "x-api-key: YOUR_PROXY_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"Hi"}]}'
 
 # Anthropic format
 curl -X POST ${baseUrl}/messages \\
-  -H "Authorization: Bearer YOUR_PROXY_API_KEY" \\
+  -H "x-api-key: YOUR_PROXY_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"model":"gpt-5.2","max_tokens":512,"messages":[{"role":"user","content":"Hi"}]}'`;
 
@@ -257,7 +258,7 @@ curl -X POST ${baseUrl}/messages \\
           <p className="text-xs text-muted-foreground mb-2">BASE URL</p>
           <code className="text-primary font-mono text-sm">{baseUrl}</code>
           <p className="text-xs text-muted-foreground mt-2">
-            All requests require: <code className="font-mono text-foreground">Authorization: Bearer YOUR_PROXY_API_KEY</code>
+            All requests require: <code className="font-mono text-foreground">x-api-key: YOUR_PROXY_API_KEY</code>
           </p>
         </section>
 
