@@ -11,6 +11,10 @@ type AnthropicMessage = { role: "user" | "assistant"; content: unknown };
 type AnthropicThinking = { type: "enabled"; budget_tokens: number } | { type: "disabled" };
 type ReasoningEffort = "low" | "medium" | "high";
 
+function normalizeModel(model: string): string {
+  return model.replace(/-\d{8}$/, "");
+}
+
 function isOpenAIModel(model: string): boolean {
   return model.startsWith("gpt") || model.startsWith("o3") || model.startsWith("o4");
 }
@@ -230,7 +234,7 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
 
 router.post("/messages", async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
-  const model = (body["model"] as string) || "claude-sonnet-4-6";
+  const model = normalizeModel((body["model"] as string) || "claude-sonnet-4-6");
 
   if (isOpenAIModel(model)) {
     await handleOpenAIViaAnthropicFormat(model, body, req, res);

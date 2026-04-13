@@ -32,6 +32,10 @@ router.get("/models", (_req: Request, res: Response) => {
 type OpenAIMessage = { role: string; content: string | null };
 type ReasoningEffort = "low" | "medium" | "high";
 
+function normalizeModel(model: string): string {
+  return model.replace(/-\d{8}$/, "");
+}
+
 function isClaudeModel(model: string): boolean {
   return model.startsWith("claude");
 }
@@ -229,7 +233,7 @@ async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, u
 
 router.post("/chat/completions", async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
-  const model = (body["model"] as string) || "gpt-5.2";
+  const model = normalizeModel((body["model"] as string) || "gpt-5.2");
 
   if (isClaudeModel(model)) {
     await handleClaudeViaOpenAIFormat(model, body, req, res);

@@ -7,9 +7,15 @@ export function proxyAuth(req: Request, res: Response, next: NextFunction): void
     return;
   }
 
-  const providedKey = (req.headers["x-api-key"] as string | undefined)?.trim();
+  const xApiKey = (req.headers["x-api-key"] as string | undefined)?.trim();
+
+  const authHeader = (req.headers["authorization"] as string | undefined)?.trim();
+  const bearerKey = authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : undefined;
+
+  const providedKey = xApiKey ?? bearerKey;
+
   if (!providedKey) {
-    res.status(401).json({ error: { message: "Missing x-api-key header.", type: "invalid_request_error" } });
+    res.status(401).json({ error: { message: "Missing authentication. Provide x-api-key header or Authorization: Bearer <key>.", type: "invalid_request_error" } });
     return;
   }
   if (providedKey !== proxyApiKey) {
