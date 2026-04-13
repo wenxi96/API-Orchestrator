@@ -26,6 +26,27 @@ function parseBetaHeaders(req: Request): string[] {
   return value.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+function isTransientError(err: unknown): boolean {
+  const e = err as Record<string, unknown>;
+  const msg = (e["message"] as string) ?? "";
+  const status = e["status"] as number | undefined;
+  return msg.includes("auth_unavailable") || status === 503 || status === 429;
+}
+
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, delayMs = 1500): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientError(err) || attempt === maxAttempts) throw err;
+      await new Promise((r) => setTimeout(r, delayMs * attempt));
+    }
+  }
+  throw lastErr;
+}
+
 async function handleAnthropicRoute(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
   const messages = (body["messages"] as AnthropicMessage[]) ?? [];
   const maxTokens = (body["max_tokens"] as number) ?? 16000;
@@ -53,23 +74,29 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
 
   try {
     if (stream) {
+      const events = await withRetry(async () => {
+        const s = anthropic.messages.stream(
+          baseParams as Parameters<typeof anthropic.messages.stream>[0],
+          requestOptions,
+        );
+        await s.initialMessage();
+        return s;
+      });
+
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
 
-      const anthropicStream = anthropic.messages.stream(
-        baseParams as Parameters<typeof anthropic.messages.stream>[0],
-        requestOptions,
-      );
-
-      for await (const event of anthropicStream) {
+      for await (const event of events) {
         res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
       }
       res.end();
     } else {
-      const message = await anthropic.messages.create(
-        baseParams as Parameters<typeof anthropic.messages.create>[0],
-        requestOptions,
+      const message = await withRetry(() =>
+        anthropic.messages.create(
+          baseParams as Parameters<typeof anthropic.messages.create>[0],
+          requestOptions,
+        )
       );
       res.json(message);
     }
