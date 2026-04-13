@@ -7,7 +7,7 @@ const router: IRouter = Router();
 
 router.use(proxyAuth);
 
-type AnthropicMessage = { role: "user" | "assistant"; content: string };
+type AnthropicMessage = { role: "user" | "assistant"; content: unknown };
 type AnthropicThinking = { type: "enabled"; budget_tokens: number } | { type: "disabled" };
 type ReasoningEffort = "low" | "medium" | "high";
 
@@ -19,21 +19,37 @@ function isReasoningModel(model: string): boolean {
   return model.startsWith("o3") || model.startsWith("o4");
 }
 
+function parseBetaHeaders(req: Request): string[] {
+  const raw = req.headers["anthropic-beta"];
+  if (!raw) return [];
+  const value = Array.isArray(raw) ? raw.join(",") : raw;
+  return value.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 async function handleAnthropicRoute(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
   const messages = (body["messages"] as AnthropicMessage[]) ?? [];
   const maxTokens = (body["max_tokens"] as number) ?? 16000;
-  const system = body["system"] as string | undefined;
+  const system = body["system"] as unknown;
   const temperature = body["temperature"] as number | undefined;
   const stream = body["stream"] === true;
   const thinking = body["thinking"] as AnthropicThinking | undefined;
+  const betas = parseBetaHeaders(req);
 
-  const baseParams = {
+  const baseParams: Record<string, unknown> = {
     model,
     max_tokens: maxTokens,
     messages,
-    ...(system ? { system } : {}),
+    ...(system !== undefined ? { system } : {}),
     ...(thinking ? { thinking } : temperature !== undefined ? { temperature } : {}),
+    ...(body["stop_sequences"] !== undefined ? { stop_sequences: body["stop_sequences"] } : {}),
+    ...(body["top_p"] !== undefined ? { top_p: body["top_p"] } : {}),
+    ...(body["top_k"] !== undefined ? { top_k: body["top_k"] } : {}),
+    ...(body["metadata"] !== undefined ? { metadata: body["metadata"] } : {}),
+    ...(body["tools"] !== undefined ? { tools: body["tools"] } : {}),
+    ...(body["tool_choice"] !== undefined ? { tool_choice: body["tool_choice"] } : {}),
   };
+
+  const requestOptions = betas.length > 0 ? { headers: { "anthropic-beta": betas.join(",") } } : {};
 
   try {
     if (stream) {
@@ -42,7 +58,8 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
       res.setHeader("Connection", "keep-alive");
 
       const anthropicStream = anthropic.messages.stream(
-        baseParams as Parameters<typeof anthropic.messages.stream>[0]
+        baseParams as Parameters<typeof anthropic.messages.stream>[0],
+        requestOptions,
       );
 
       for await (const event of anthropicStream) {
@@ -51,14 +68,18 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
       res.end();
     } else {
       const message = await anthropic.messages.create(
-        baseParams as Parameters<typeof anthropic.messages.create>[0]
+        baseParams as Parameters<typeof anthropic.messages.create>[0],
+        requestOptions,
       );
       res.json(message);
     }
   } catch (err: unknown) {
     req.log.error({ err }, "Anthropic messages error");
     if (!res.headersSent) {
-      res.status(500).json({ type: "error", error: { type: "api_error", message: "Upstream Anthropic error" } });
+      const errObj = err as Record<string, unknown>;
+      const status = (errObj["status"] as number) ?? 500;
+      const upstreamMsg = (errObj["message"] as string) ?? "Upstream Anthropic error";
+      res.status(status).json({ type: "error", error: { type: "api_error", message: upstreamMsg } });
     } else {
       res.end();
     }
@@ -66,7 +87,7 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
 }
 
 async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
-  const messages = (body["messages"] as AnthropicMessage[]) ?? [];
+  const messages = (body["messages"] as { role: "user" | "assistant"; content: string }[]) ?? [];
   const maxTokens = (body["max_tokens"] as number) ?? 16000;
   const system = body["system"] as string | undefined;
   const temperature = body["temperature"] as number | undefined;
@@ -78,7 +99,6 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
   for (const m of messages) openaiMessages.push({ role: m.role, content: m.content });
 
   const messageId = `msg_proxy_${Date.now()}`;
-  const created = Math.floor(Date.now() / 1000);
   const isReasoning = isReasoningModel(model);
 
   const extraParams = {
@@ -106,9 +126,7 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
       res.write(`event: ping\ndata: ${JSON.stringify({ type: "ping" })}\n\n`);
 
       const completionStream = await openai.chat.completions.create({
-        model,
-        messages: openaiMessages,
-        stream: true,
+        model, messages: openaiMessages, stream: true,
         stream_options: { include_usage: true },
         ...extraParams,
       } as Parameters<typeof openai.chat.completions.create>[0]);
@@ -120,7 +138,6 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
 
       for await (const chunk of completionStream) {
         const delta = chunk.choices[0]?.delta as Record<string, unknown> | undefined;
-
         const reasoningContent = delta?.["reasoning_content"] as string | undefined;
         if (reasoningContent) {
           if (!reasoningBlockStarted) {
@@ -130,7 +147,6 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
           reasoningBuffer += reasoningContent;
           res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: reasoningContent } })}\n\n`);
         }
-
         const content = delta?.["content"] as string | undefined;
         if (content) {
           if (reasoningBlockStarted) {
@@ -141,7 +157,6 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
           outputTokens += 1;
           res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: reasoningBuffer ? 1 : 0, delta: { type: "text_delta", text: content } })}\n\n`);
         }
-
         const finishReason = chunk.choices[0]?.finish_reason;
         if (finishReason) stopReason = finishReason === "stop" ? "end_turn" : finishReason;
         if (chunk.usage) outputTokens = chunk.usage.completion_tokens ?? outputTokens;
@@ -153,10 +168,7 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
       res.end();
     } else {
       const completion = await openai.chat.completions.create({
-        model,
-        messages: openaiMessages,
-        stream: false,
-        ...extraParams,
+        model, messages: openaiMessages, stream: false, ...extraParams,
       } as Parameters<typeof openai.chat.completions.create>[0]);
 
       const msg = completion.choices[0]?.message as Record<string, unknown> | undefined;
@@ -170,8 +182,7 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
 
       res.json({
         id: messageId, type: "message", role: "assistant",
-        content: contentBlocks,
-        model,
+        content: contentBlocks, model,
         stop_reason: finishReason === "stop" ? "end_turn" : finishReason,
         stop_sequence: null,
         usage: {
