@@ -240,12 +240,16 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
 
 router.post("/messages", async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
-  const model = normalizeModel((body["model"] as string) || "claude-sonnet-4-6");
+  const originalModel = (body["model"] as string) || "claude-sonnet-4-6";
+  // Normalize only for routing decision — strip date suffix so "claude-haiku-4-5-20251001"
+  // routes to Anthropic, and "gpt-4o-2024-11-20" routes to OpenAI.
+  // The ORIGINAL model name (with date suffix) is forwarded to the upstream API.
+  const routingModel = normalizeModel(originalModel);
 
-  if (isOpenAIModel(model)) {
-    await handleOpenAIViaAnthropicFormat(model, body, req, res);
+  if (isOpenAIModel(routingModel)) {
+    await handleOpenAIViaAnthropicFormat(originalModel, body, req, res);
   } else {
-    await handleAnthropicRoute(model, body, req, res);
+    await handleAnthropicRoute(originalModel, body, req, res);
   }
 });
 
