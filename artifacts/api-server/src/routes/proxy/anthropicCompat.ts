@@ -34,7 +34,11 @@ function isTransientError(err: unknown): boolean {
   const e = err as Record<string, unknown>;
   const msg = (e["message"] as string) ?? "";
   const status = e["status"] as number | undefined;
-  return msg.includes("auth_unavailable") || status === 503 || status === 429;
+  // auth_unavailable is a Replit AI Integration cooldown that lasts several minutes.
+  // Retrying here is futile — pass it through immediately so the client's own
+  // backoff (e.g. Claude Code's 10-attempt retry) can handle it properly.
+  if (msg.includes("auth_unavailable")) return false;
+  return status === 429;
 }
 
 async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, delayMs = 1500): Promise<T> {
