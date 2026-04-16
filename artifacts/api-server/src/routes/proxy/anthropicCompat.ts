@@ -60,6 +60,20 @@ function isStreamingRequiredError(err: unknown): boolean {
   return msg.includes("Streaming is required");
 }
 
+// Beta headers known to produce long-running generations (minutes).
+// Non-streaming requests with these headers tend to hit intermediate proxy
+// idle-connection timeouts (~2-3 min) before the response arrives, returning
+// "context canceled". We detect them early and always use streaming internally
+// so the upstream connection stays active throughout generation.
+const LONG_RUNNING_BETAS = [
+  "interleaved-thinking",
+  "context-1m",
+];
+
+function isLongRunningRequest(betas: string[]): boolean {
+  return betas.some((b) => LONG_RUNNING_BETAS.some((lr) => b.includes(lr)));
+}
+
 // Collect a streaming response and reassemble it into a complete Message object.
 // Used when the upstream refuses non-streaming requests (e.g. large context + thinking betas).
 async function collectStreamAsMessage(
@@ -177,21 +191,34 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
       }
       res.end();
     } else {
-      // Non-streaming path. Some upstream configurations (e.g. large context + thinking betas)
-      // mandate streaming. If the upstream rejects with "Streaming is required", transparently
-      // upgrade: stream internally, collect all events, and return a complete Message JSON.
+      // Non-streaming path.
+      //
+      // Two reasons we might need to collect via streaming internally:
+      //   1. Upstream returns "Streaming is required" for very long operations.
+      //   2. Requests carrying long-running betas (interleaved-thinking, context-1m) take
+      //      minutes to complete. Idle non-streaming connections get killed by intermediate
+      //      proxy timeouts (~2-3 min) and return "context canceled". Streaming keeps the
+      //      upstream connection alive with a continuous flow of events.
+      //
+      // For case 2, skip the non-streaming attempt entirely and go straight to
+      // stream-and-collect so the connection is always active during generation.
       let message: Record<string, unknown>;
-      try {
-        message = await withRetry(() =>
-          anthropic.messages.create(
-            baseParams as Parameters<typeof anthropic.messages.create>[0],
-            requestOptions,
-          )
-        ) as unknown as Record<string, unknown>;
-      } catch (firstErr: unknown) {
-        if (!isStreamingRequiredError(firstErr)) throw firstErr;
-        req.log.warn({ model }, "Upstream requires streaming — falling back to stream-and-collect");
+      if (isLongRunningRequest(betas)) {
+        req.log.info({ model, betas }, "Long-running betas detected — using stream-and-collect");
         message = await withRetry(() => collectStreamAsMessage(baseParams, requestOptions));
+      } else {
+        try {
+          message = await withRetry(() =>
+            anthropic.messages.create(
+              baseParams as Parameters<typeof anthropic.messages.create>[0],
+              requestOptions,
+            )
+          ) as unknown as Record<string, unknown>;
+        } catch (firstErr: unknown) {
+          if (!isStreamingRequiredError(firstErr)) throw firstErr;
+          req.log.warn({ model }, "Upstream requires streaming — falling back to stream-and-collect");
+          message = await withRetry(() => collectStreamAsMessage(baseParams, requestOptions));
+        }
       }
       res.json(message);
     }
