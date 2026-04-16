@@ -34,7 +34,11 @@ function isTransientError(err: unknown): boolean {
   const e = err as Record<string, unknown>;
   const msg = (e["message"] as string) ?? "";
   const status = e["status"] as number | undefined;
-  return msg.includes("auth_unavailable") || status === 503 || status === 429;
+  // auth_unavailable is a Replit AI Integration cooldown that lasts several minutes.
+  // Retrying here is futile — pass it through immediately so the client's own
+  // backoff (e.g. Claude Code's 10-attempt retry) can handle it properly.
+  if (msg.includes("auth_unavailable")) return false;
+  return status === 429;
 }
 
 async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, delayMs = 1500): Promise<T> {
@@ -52,13 +56,20 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, delayMs = 150
 }
 
 async function handleAnthropicRoute(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
-  const messages = (body["messages"] as AnthropicMessage[]) ?? [];
+  let messages = (body["messages"] as AnthropicMessage[]) ?? [];
   const maxTokens = (body["max_tokens"] as number) ?? 16000;
   const system = body["system"] as unknown;
   const temperature = body["temperature"] as number | undefined;
   const stream = body["stream"] === true;
   const thinking = body["thinking"] as AnthropicThinking | undefined;
   const betas = parseBetaHeaders(req);
+
+  // Vertex AI does not support assistant-prefill (last message role = "assistant").
+  // Strip any trailing assistant turns so the conversation always ends with a user message.
+  while (messages.length > 0 && messages[messages.length - 1]?.role === "assistant") {
+    req.log.warn({ model }, "Stripped trailing assistant message (prefill not supported on Vertex AI)");
+    messages = messages.slice(0, -1);
+  }
 
   const baseParams: Record<string, unknown> = {
     model,
@@ -236,12 +247,16 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
 
 router.post("/messages", async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
-  const model = normalizeModel((body["model"] as string) || "claude-sonnet-4-6");
+  const originalModel = (body["model"] as string) || "claude-sonnet-4-6";
+  // Normalize only for routing decision — strip date suffix so "claude-haiku-4-5-20251001"
+  // routes to Anthropic, and "gpt-4o-2024-11-20" routes to OpenAI.
+  // The ORIGINAL model name (with date suffix) is forwarded to the upstream API.
+  const routingModel = normalizeModel(originalModel);
 
-  if (isOpenAIModel(model)) {
-    await handleOpenAIViaAnthropicFormat(model, body, req, res);
+  if (isOpenAIModel(routingModel)) {
+    await handleOpenAIViaAnthropicFormat(originalModel, body, req, res);
   } else {
-    await handleAnthropicRoute(model, body, req, res);
+    await handleAnthropicRoute(originalModel, body, req, res);
   }
 });
 

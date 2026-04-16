@@ -233,12 +233,15 @@ async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, u
 
 router.post("/chat/completions", async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
-  const model = normalizeModel((body["model"] as string) || "gpt-5.2");
+  const originalModel = (body["model"] as string) || "gpt-5.2";
+  // Normalize only for routing decision — the original model name (with any
+  // date suffix) is forwarded to the upstream API.
+  const routingModel = normalizeModel(originalModel);
 
-  if (isClaudeModel(model)) {
-    await handleClaudeViaOpenAIFormat(model, body, req, res);
+  if (isClaudeModel(routingModel)) {
+    await handleClaudeViaOpenAIFormat(originalModel, body, req, res);
   } else {
-    await handleOpenAIRoute(model, body, req, res);
+    await handleOpenAIRoute(originalModel, body, req, res);
   }
 });
 

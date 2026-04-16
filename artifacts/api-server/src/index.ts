@@ -1,5 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { warmupAnthropicAuth } from "./lib/authWarmup.js";
 
 const rawPort = process.env["PORT"];
 
@@ -22,4 +23,10 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+
+  // Warm up Anthropic auth in the background so the first real request
+  // doesn't hit an auth_unavailable cold-start error.
+  warmupAnthropicAuth().catch((e) => {
+    logger.error({ err: e }, "Auth warmup failed unexpectedly");
+  });
 });

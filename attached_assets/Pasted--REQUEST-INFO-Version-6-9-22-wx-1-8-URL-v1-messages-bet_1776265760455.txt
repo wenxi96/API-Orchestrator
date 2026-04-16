@@ -1,0 +1,51 @@
+=== REQUEST INFO ===
+Version: 6.9.22-wx-1.8
+URL: /v1/messages?beta=true
+Method: POST
+Downstream Transport: http
+Upstream Transport: http
+Timestamp: 2026-04-15T23:08:50.035479651+08:00
+
+
+=== HEADERS ===
+Accept-Language: *
+Connection: keep-alive
+X-Stainless-Os: Linux
+Anthropic-Beta: interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15
+Accept: application/json
+User-Agent: claude-cli/2.1.96 (external, cli)
+X-App: cli
+Sec-Fetch-Mode: cors
+Accept-Encoding: gzip, deflate
+X-Stainless-Timeout: 600
+Anthropic-Dangerous-Direct-Browser-Access: true
+X-Claude-Code-Session-Id: 7ba00a54-0190-4944-9eee-ed2e4261361a
+Authorization: Bearer sk-1...6526
+X-Stainless-Lang: js
+X-Stainless-Arch: x64
+X-Stainless-Runtime-Version: v24.12.0
+Anthropic-Version: 2023-06-01
+Content-Type: application/json
+X-Stainless-Runtime: node
+Content-Length: 1494
+X-Stainless-Retry-Count: 0
+X-Stainless-Package-Version: 0.81.0
+
+
+=== REQUEST BODY ===
+{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"继续"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.96.83c; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.\n\nReturn JSON with a single \"title\" field.\n\nGood examples:\n{\"title\": \"Fix login button on mobile\"}\n{\"title\": \"Add OAuth authentication\"}\n{\"title\": \"Debug failing CI tests\"}\n{\"title\": \"Refactor API client error handling\"}\n\nBad (too vague): {\"title\": \"Code changes\"}\nBad (too long): {\"title\": \"Investigate and fix the issue where the login button does not respond on mobile devices\"}\nBad (wrong case): {\"title\": \"Fix Login Button On Mobile\"}"}],"tools":[],"metadata":{"user_id":"{\"device_id\":\"83e7f1d7a438d5fad0213bc1049efc5ff49f44fda2a52740540bccfb9cef3e08\",\"account_uuid\":\"\",\"session_id\":\"7ba00a54-0190-4944-9eee-ed2e4261361a\"}"},"max_tokens":32000,"temperature":1,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}
+
+
+=== API RESPONSE ===
+Timestamp: 2026-04-15T23:08:50.035541107+08:00
+{"error":{"message":"unknown provider for model claude-haiku-4-5-20251001","type":"server_error","code":"internal_server_error"}}
+
+
+=== RESPONSE ===
+Status: 502
+Content-Type: application/json
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: *
+
+{"error":{"message":"unknown provider for model claude-haiku-4-5-20251001","type":"server_error","code":"internal_server_error"}}
