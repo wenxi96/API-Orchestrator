@@ -55,6 +55,74 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, delayMs = 150
   throw lastErr;
 }
 
+function isStreamingRequiredError(err: unknown): boolean {
+  const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
+  return msg.includes("Streaming is required");
+}
+
+// Collect a streaming response and reassemble it into a complete Message object.
+// Used when the upstream refuses non-streaming requests (e.g. large context + thinking betas).
+async function collectStreamAsMessage(
+  params: Record<string, unknown>,
+  requestOptions: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const eventStream = await anthropic.messages.create(
+    { ...params, stream: true } as Parameters<typeof anthropic.messages.create>[0],
+    requestOptions,
+  );
+
+  type ContentBlock = { type: string; text?: string; thinking?: string; input?: string; id?: string; name?: string };
+  let messageBase: Record<string, unknown> = {};
+  const contentBlocks: ContentBlock[] = [];
+
+  for await (const event of (eventStream as AsyncIterable<Record<string, unknown>>)) {
+    const type = event["type"] as string;
+
+    if (type === "message_start") {
+      messageBase = { ...(event["message"] as Record<string, unknown>) };
+      messageBase["content"] = [];
+    } else if (type === "content_block_start") {
+      const idx = event["index"] as number;
+      const block = { ...(event["content_block"] as ContentBlock) };
+      contentBlocks[idx] = block;
+    } else if (type === "content_block_delta") {
+      const idx = event["index"] as number;
+      const delta = event["delta"] as Record<string, unknown>;
+      const block = contentBlocks[idx];
+      if (!block) continue;
+      const deltaType = delta["type"] as string;
+      if (deltaType === "text_delta") {
+        block.text = (block.text ?? "") + (delta["text"] as string);
+      } else if (deltaType === "thinking_delta") {
+        block.thinking = (block.thinking ?? "") + (delta["thinking"] as string);
+      } else if (deltaType === "input_json_delta") {
+        block.input = (block.input ?? "") + (delta["partial_json"] as string);
+      }
+    } else if (type === "message_delta") {
+      const delta = event["delta"] as Record<string, unknown>;
+      if (delta["stop_reason"]) messageBase["stop_reason"] = delta["stop_reason"];
+      if (delta["stop_sequence"] !== undefined) messageBase["stop_sequence"] = delta["stop_sequence"];
+      const usage = event["usage"] as Record<string, unknown> | undefined;
+      if (usage) {
+        messageBase["usage"] = {
+          ...(messageBase["usage"] as Record<string, unknown> ?? {}),
+          ...usage,
+        };
+      }
+    }
+  }
+
+  // Parse accumulated tool-input JSON strings into objects
+  for (const block of contentBlocks) {
+    if (block.type === "tool_use" && typeof block.input === "string") {
+      try { block.input = JSON.parse(block.input); } catch { /* leave as-is */ }
+    }
+  }
+
+  messageBase["content"] = contentBlocks.filter(Boolean);
+  return messageBase;
+}
+
 async function handleAnthropicRoute(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
   let messages = (body["messages"] as AnthropicMessage[]) ?? [];
   const maxTokens = (body["max_tokens"] as number) ?? 16000;
@@ -109,12 +177,22 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
       }
       res.end();
     } else {
-      const message = await withRetry(() =>
-        anthropic.messages.create(
-          baseParams as Parameters<typeof anthropic.messages.create>[0],
-          requestOptions,
-        )
-      );
+      // Non-streaming path. Some upstream configurations (e.g. large context + thinking betas)
+      // mandate streaming. If the upstream rejects with "Streaming is required", transparently
+      // upgrade: stream internally, collect all events, and return a complete Message JSON.
+      let message: Record<string, unknown>;
+      try {
+        message = await withRetry(() =>
+          anthropic.messages.create(
+            baseParams as Parameters<typeof anthropic.messages.create>[0],
+            requestOptions,
+          )
+        ) as unknown as Record<string, unknown>;
+      } catch (firstErr: unknown) {
+        if (!isStreamingRequiredError(firstErr)) throw firstErr;
+        req.log.warn({ model }, "Upstream requires streaming — falling back to stream-and-collect");
+        message = await withRetry(() => collectStreamAsMessage(baseParams, requestOptions));
+      }
       res.json(message);
     }
   } catch (err: unknown) {
