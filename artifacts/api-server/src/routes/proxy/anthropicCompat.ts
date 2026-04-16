@@ -56,13 +56,20 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, delayMs = 150
 }
 
 async function handleAnthropicRoute(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
-  const messages = (body["messages"] as AnthropicMessage[]) ?? [];
+  let messages = (body["messages"] as AnthropicMessage[]) ?? [];
   const maxTokens = (body["max_tokens"] as number) ?? 16000;
   const system = body["system"] as unknown;
   const temperature = body["temperature"] as number | undefined;
   const stream = body["stream"] === true;
   const thinking = body["thinking"] as AnthropicThinking | undefined;
   const betas = parseBetaHeaders(req);
+
+  // Vertex AI does not support assistant-prefill (last message role = "assistant").
+  // Strip any trailing assistant turns so the conversation always ends with a user message.
+  while (messages.length > 0 && messages[messages.length - 1]?.role === "assistant") {
+    req.log.warn({ model }, "Stripped trailing assistant message (prefill not supported on Vertex AI)");
+    messages = messages.slice(0, -1);
+  }
 
   const baseParams: Record<string, unknown> = {
     model,
