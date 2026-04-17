@@ -1,4 +1,16 @@
 import { Request, Response, NextFunction } from "express";
+import { timingSafeEqual } from "node:crypto";
+
+function safeCompare(a: string, b: string): boolean {
+  // Both buffers must be the same length for timingSafeEqual; pad the shorter
+  // one so we always perform the comparison and don't leak length via timing.
+  const maxLen = Math.max(a.length, b.length);
+  const ab = Buffer.alloc(maxLen, 0);
+  const bb = Buffer.alloc(maxLen, 0);
+  ab.write(a);
+  bb.write(b);
+  return a.length === b.length && timingSafeEqual(ab, bb);
+}
 
 export function proxyAuth(req: Request, res: Response, next: NextFunction): void {
   const proxyApiKey = process.env["PROXY_API_KEY"];
@@ -8,7 +20,6 @@ export function proxyAuth(req: Request, res: Response, next: NextFunction): void
   }
 
   const xApiKey = (req.headers["x-api-key"] as string | undefined)?.trim();
-
   const authHeader = (req.headers["authorization"] as string | undefined)?.trim();
   const bearerKey = authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : undefined;
 
@@ -18,7 +29,7 @@ export function proxyAuth(req: Request, res: Response, next: NextFunction): void
     res.status(401).json({ error: { message: "Missing authentication. Provide x-api-key header or Authorization: Bearer <key>.", type: "invalid_request_error" } });
     return;
   }
-  if (providedKey !== proxyApiKey) {
+  if (!safeCompare(providedKey, proxyApiKey)) {
     res.status(401).json({ error: { message: "Invalid API key.", type: "invalid_request_error" } });
     return;
   }
