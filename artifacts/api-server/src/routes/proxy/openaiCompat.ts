@@ -8,6 +8,7 @@ const router: IRouter = Router();
 router.use(proxyAuth);
 
 const OPENAI_MODELS = [
+  { id: "gpt-5.4", object: "model", owned_by: "openai" },
   { id: "gpt-5.2", object: "model", owned_by: "openai" },
   { id: "gpt-5.1", object: "model", owned_by: "openai" },
   { id: "gpt-5", object: "model", owned_by: "openai" },
@@ -18,6 +19,7 @@ const OPENAI_MODELS = [
 ];
 
 const ANTHROPIC_MODELS = [
+  { id: "claude-opus-4-7", object: "model", owned_by: "anthropic" },
   { id: "claude-opus-4-6", object: "model", owned_by: "anthropic" },
   { id: "claude-opus-4-5", object: "model", owned_by: "anthropic" },
   { id: "claude-sonnet-4-6", object: "model", owned_by: "anthropic" },
@@ -41,7 +43,7 @@ function isClaudeModel(model: string): boolean {
 }
 
 function isReasoningModel(model: string): boolean {
-  return model.startsWith("o3") || model.startsWith("o4");
+  return model.startsWith("o3") || model.startsWith("o4") || model === "gpt-5.4" || model.startsWith("gpt-5.4-");
 }
 
 async function handleOpenAIRoute(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
