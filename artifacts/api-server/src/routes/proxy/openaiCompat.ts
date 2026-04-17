@@ -59,19 +59,27 @@ function isTransientError(err: unknown): boolean {
   const status = e["status"] as number | undefined;
   if (msg.includes("auth_unavailable")) return false;
   if (status === 429) return true;
-  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return true;
+  if (isNetworkError(msg)) return true;
   return false;
+}
+
+function isNetworkError(msg: string): boolean {
+  return msg.includes("i/o timeout")
+    || msg.includes("dial tcp")
+    || msg.includes("EOF")
+    || msg.includes("connection reset")
+    || msg.includes("ECONNRESET");
 }
 
 function retryDelay(err: unknown, attempt: number): number {
   const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
-  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return 1000;
+  if (isNetworkError(msg)) return 1000;
   return 1500 * attempt;
 }
 
 function maxRetryAttempts(err: unknown, defaultMax: number): number {
   const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
-  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return 2;
+  if (isNetworkError(msg)) return 3;
   return defaultMax;
 }
 

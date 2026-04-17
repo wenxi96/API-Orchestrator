@@ -39,24 +39,36 @@ function isTransientError(err: unknown): boolean {
   // backoff (e.g. Claude Code's 10-attempt retry) can handle it properly.
   if (msg.includes("auth_unavailable")) return false;
   if (status === 429) return true;
-  // Network-level timeouts from Replit AI Integration orchestrator nodes (e.g. wendcc1).
+  // Network-level transient failures from Replit AI Integration orchestrator nodes.
   // Retrying causes the Integration to re-route through a different healthy node.
-  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return true;
+  //   - "i/o timeout" / "dial tcp": TCP connection couldn't be established
+  //   - "EOF": upstream closed the connection mid-request unexpectedly
+  //   - "connection reset" / "ECONNRESET": peer reset the TCP connection
+  if (isNetworkError(msg)) return true;
   return false;
 }
 
-// Delay before retry. Network timeout retries use a short fixed delay (fast failover);
+function isNetworkError(msg: string): boolean {
+  return msg.includes("i/o timeout")
+    || msg.includes("dial tcp")
+    || msg.includes("EOF")
+    || msg.includes("connection reset")
+    || msg.includes("ECONNRESET");
+}
+
+// Delay before retry. Network errors use a short fixed delay (fast failover);
 // 429 rate-limit retries use exponential backoff.
 function retryDelay(err: unknown, attempt: number): number {
   const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
-  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return 1000;
+  if (isNetworkError(msg)) return 1000;
   return 1500 * attempt;
 }
 
 function maxAttempts(err: unknown, defaultMax: number): number {
   const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
-  // Network timeouts already cost ~32 s each — cap at 2 attempts (1 retry) for fast failover.
-  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return 2;
+  // Network errors fail fast (~5–32 s each) — allow up to 3 attempts (2 retries)
+  // so we can survive both Integration nodes being briefly unhealthy.
+  if (isNetworkError(msg)) return 3;
   return defaultMax;
 }
 
