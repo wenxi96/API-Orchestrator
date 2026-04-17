@@ -85,7 +85,7 @@ async function collectStreamAsMessage(
     requestOptions,
   );
 
-  type ContentBlock = { type: string; text?: string; thinking?: string; input?: string; id?: string; name?: string };
+  type ContentBlock = { type: string; text?: string; thinking?: string; signature?: string; input?: string; id?: string; name?: string };
   let messageBase: Record<string, unknown> = {};
   const contentBlocks: ContentBlock[] = [];
 
@@ -109,6 +109,12 @@ async function collectStreamAsMessage(
         block.text = (block.text ?? "") + (delta["text"] as string);
       } else if (deltaType === "thinking_delta") {
         block.thinking = (block.thinking ?? "") + (delta["thinking"] as string);
+      } else if (deltaType === "signature_delta") {
+        // Thinking blocks carry a cryptographic signature delivered as a
+        // separate signature_delta event. Capture it so the reconstructed
+        // Message has a valid signature that Vertex AI will accept in
+        // subsequent conversation turns.
+        block.signature = delta["signature"] as string;
       } else if (deltaType === "input_json_delta") {
         block.input = (block.input ?? "") + (delta["partial_json"] as string);
       }
