@@ -85,7 +85,7 @@ async function collectStreamAsMessage(
     requestOptions,
   );
 
-  type ContentBlock = { type: string; text?: string; thinking?: string; input?: string; id?: string; name?: string };
+  type ContentBlock = { type: string; text?: string; thinking?: string; signature?: string; input?: string; id?: string; name?: string };
   let messageBase: Record<string, unknown> = {};
   const contentBlocks: ContentBlock[] = [];
 
@@ -109,6 +109,12 @@ async function collectStreamAsMessage(
         block.text = (block.text ?? "") + (delta["text"] as string);
       } else if (deltaType === "thinking_delta") {
         block.thinking = (block.thinking ?? "") + (delta["thinking"] as string);
+      } else if (deltaType === "signature_delta") {
+        // Thinking blocks carry a cryptographic signature delivered as a
+        // separate signature_delta event. Capture it so the reconstructed
+        // Message has a valid signature that Vertex AI will accept in
+        // subsequent conversation turns.
+        block.signature = delta["signature"] as string;
       } else if (deltaType === "input_json_delta") {
         block.input = (block.input ?? "") + (delta["partial_json"] as string);
       }
@@ -152,23 +158,6 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
     req.log.warn({ model }, "Stripped trailing assistant message (prefill not supported on Vertex AI)");
     messages = messages.slice(0, -1);
   }
-
-  // Thinking blocks in conversation history carry a `signature` tied to the endpoint
-  // that generated them. Vertex AI validates signatures and rejects blocks that were
-  // signed by a different endpoint (e.g. Anthropic Direct), returning 400
-  // "Invalid `signature` in `thinking` block". Strip thinking blocks from all
-  // assistant messages in the conversation history before forwarding.
-  messages = messages.map((msg) => {
-    if (msg.role !== "assistant") return msg;
-    const content = msg.content;
-    if (!Array.isArray(content)) return msg;
-    const filtered = content.filter(
-      (block: unknown) => (block as Record<string, unknown>)["type"] !== "thinking"
-    );
-    if (filtered.length === content.length) return msg;
-    req.log.debug({ model }, "Stripped thinking blocks from assistant message history");
-    return { ...msg, content: filtered };
-  });
 
   const baseParams: Record<string, unknown> = {
     model,
