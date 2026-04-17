@@ -1,0 +1,120 @@
+=== REQUEST INFO ===
+Version: 6.9.22-wx-1.8
+URL: /v1/messages?beta=true
+Method: POST
+Downstream Transport: http
+Upstream Transport: http
+Timestamp: 2026-04-17T11:24:50.669736109+08:00
+
+
+=== HEADERS ===
+Anthropic-Dangerous-Direct-Browser-Access: true
+Sec-Fetch-Mode: cors
+X-Stainless-Runtime: node
+X-Stainless-Runtime-Version: v24.12.0
+X-Claude-Code-Session-Id: 3f45e3d4-2670-4b25-b69d-7aedcebb14f4
+X-App: cli
+X-Stainless-Lang: js
+Content-Length: 1494
+X-Stainless-Retry-Count: 0
+X-Stainless-Package-Version: 0.81.0
+X-Stainless-Arch: x64
+X-Stainless-Os: Linux
+Anthropic-Version: 2023-06-01
+User-Agent: claude-cli/2.1.96 (external, cli)
+Authorization: Bearer sk-1...6526
+Connection: keep-alive
+Anthropic-Beta: interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15
+Accept-Language: *
+Accept-Encoding: gzip, deflate
+Content-Type: application/json
+Accept: application/json
+X-Stainless-Timeout: 600
+
+
+=== REQUEST BODY ===
+{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"继续"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.96.83c; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.\n\nReturn JSON with a single \"title\" field.\n\nGood examples:\n{\"title\": \"Fix login button on mobile\"}\n{\"title\": \"Add OAuth authentication\"}\n{\"title\": \"Debug failing CI tests\"}\n{\"title\": \"Refactor API client error handling\"}\n\nBad (too vague): {\"title\": \"Code changes\"}\nBad (too long): {\"title\": \"Investigate and fix the issue where the login button does not respond on mobile devices\"}\nBad (wrong case): {\"title\": \"Fix Login Button On Mobile\"}"}],"tools":[],"metadata":{"user_id":"{\"device_id\":\"83e7f1d7a438d5fad0213bc1049efc5ff49f44fda2a52740540bccfb9cef3e08\",\"account_uuid\":\"\",\"session_id\":\"3f45e3d4-2670-4b25-b69d-7aedcebb14f4\"}"},"max_tokens":32000,"temperature":1,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}
+
+
+=== API REQUEST 1 ===
+Timestamp: 2026-04-17T11:24:50.670303736+08:00
+Upstream URL: https://api-orchestrator-wendcc1.replit.app/api/v1/messages?beta=true
+HTTP Method: POST
+Auth: provider=claude, auth_id=claude:apikey:2c9c4db5aea9, label=claude-apikey, type=api_key value=9202...3630
+
+Headers:
+Accept: text/event-stream
+Accept-Encoding: identity
+Anthropic-Beta: interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,oauth-2025-04-20
+Anthropic-Dangerous-Direct-Browser-Access: true
+Anthropic-Version: 2023-06-01
+Authorization: Bearer 9202...3630
+Connection: keep-alive
+Content-Type: application/json
+User-Agent: claude-cli/2.1.96 (external, cli)
+X-Api-Key: 9202...3630
+X-App: cli
+X-Claude-Code-Session-Id: 3f45e3d4-2670-4b25-b69d-7aedcebb14f4
+X-Stainless-Arch: x64
+X-Stainless-Lang: js
+X-Stainless-Os: Linux
+X-Stainless-Package-Version: 0.81.0
+X-Stainless-Retry-Count: 0
+X-Stainless-Runtime: node
+X-Stainless-Runtime-Version: v24.12.0
+X-Stainless-Timeout: 600
+
+Body:
+{"model":"claude-haiku-4-5","messages":[{"role":"user","content":[{"type":"text","text":"继续"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.96.83c; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.\n\nReturn JSON with a single \"title\" field.\n\nGood examples:\n{\"title\": \"Fix login button on mobile\"}\n{\"title\": \"Add OAuth authentication\"}\n{\"title\": \"Debug failing CI tests\"}\n{\"title\": \"Refactor API client error handling\"}\n\nBad (too vague): {\"title\": \"Code changes\"}\nBad (too long): {\"title\": \"Investigate and fix the issue where the login button does not respond on mobile devices\"}\nBad (wrong case): {\"title\": \"Fix Login Button On Mobile\"}","cache_control":{"type":"ephemeral"}}],"tools":[],"metadata":{"user_id":"{\"device_id\":\"83e7f1d7a438d5fad0213bc1049efc5ff49f44fda2a52740540bccfb9cef3e08\",\"account_uuid\":\"\",\"session_id\":\"3f45e3d4-2670-4b25-b69d-7aedcebb14f4\"}"},"max_tokens":32000,"temperature":1,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}
+
+=== API REQUEST 2 ===
+Timestamp: 2026-04-17T11:25:21.61212918+08:00
+Upstream URL: https://api-orchestrator.replit.app/api/v1/messages?beta=true
+HTTP Method: POST
+Auth: provider=claude, auth_id=claude:apikey:332843687a59, label=claude-apikey, type=api_key value=9202...3630
+
+Headers:
+Accept: text/event-stream
+Accept-Encoding: identity
+Anthropic-Beta: interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,oauth-2025-04-20
+Anthropic-Dangerous-Direct-Browser-Access: true
+Anthropic-Version: 2023-06-01
+Authorization: Bearer 9202...3630
+Connection: keep-alive
+Content-Type: application/json
+User-Agent: claude-cli/2.1.96 (external, cli)
+X-Api-Key: 9202...3630
+X-App: cli
+X-Claude-Code-Session-Id: 3f45e3d4-2670-4b25-b69d-7aedcebb14f4
+X-Stainless-Arch: x64
+X-Stainless-Lang: js
+X-Stainless-Os: Linux
+X-Stainless-Package-Version: 0.81.0
+X-Stainless-Retry-Count: 0
+X-Stainless-Runtime: node
+X-Stainless-Runtime-Version: v24.12.0
+X-Stainless-Timeout: 600
+
+Body:
+{"model":"claude-haiku-4-5","messages":[{"role":"user","content":[{"type":"text","text":"继续"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.96.83c; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.\n\nReturn JSON with a single \"title\" field.\n\nGood examples:\n{\"title\": \"Fix login button on mobile\"}\n{\"title\": \"Add OAuth authentication\"}\n{\"title\": \"Debug failing CI tests\"}\n{\"title\": \"Refactor API client error handling\"}\n\nBad (too vague): {\"title\": \"Code changes\"}\nBad (too long): {\"title\": \"Investigate and fix the issue where the login button does not respond on mobile devices\"}\nBad (wrong case): {\"title\": \"Fix Login Button On Mobile\"}","cache_control":{"type":"ephemeral"}}],"tools":[],"metadata":{"user_id":"{\"device_id\":\"83e7f1d7a438d5fad0213bc1049efc5ff49f44fda2a52740540bccfb9cef3e08\",\"account_uuid\":\"\",\"session_id\":\"3f45e3d4-2670-4b25-b69d-7aedcebb14f4\"}"},"max_tokens":32000,"temperature":1,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}
+
+
+=== API RESPONSE 1 ===
+Timestamp: 2026-04-17T11:25:21.61164139+08:00
+
+Error: Post "https://api-orchestrator-wendcc1.replit.app/api/v1/messages?beta=true": dial tcp 198.18.0.26:443: i/o timeout
+
+=== API RESPONSE 2 ===
+Timestamp: 2026-04-17T11:25:55.084844601+08:00
+
+Error: Post "https://api-orchestrator.replit.app/api/v1/messages?beta=true": dial tcp 198.18.0.22:443: i/o timeout
+
+
+=== RESPONSE ===
+Status: 500
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: *
+Content-Type: application/json
+Access-Control-Allow-Origin: *
+
+{"error":{"message":"Post \"https://api-orchestrator.replit.app/api/v1/messages?beta=true\": dial tcp 198.18.0.22:443: i/o timeout","type":"server_error","code":"internal_server_error"}}
