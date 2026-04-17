@@ -20,7 +20,7 @@ function isOpenAIModel(model: string): boolean {
 }
 
 function isReasoningModel(model: string): boolean {
-  return model.startsWith("o3") || model.startsWith("o4");
+  return model.startsWith("o3") || model.startsWith("o4") || model === "gpt-5.4" || model.startsWith("gpt-5.4-");
 }
 
 function parseBetaHeaders(req: Request): string[] {
@@ -38,18 +38,38 @@ function isTransientError(err: unknown): boolean {
   // Retrying here is futile — pass it through immediately so the client's own
   // backoff (e.g. Claude Code's 10-attempt retry) can handle it properly.
   if (msg.includes("auth_unavailable")) return false;
-  return status === 429;
+  if (status === 429) return true;
+  // Network-level timeouts from Replit AI Integration orchestrator nodes (e.g. wendcc1).
+  // Retrying causes the Integration to re-route through a different healthy node.
+  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return true;
+  return false;
 }
 
-async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, delayMs = 1500): Promise<T> {
+// Delay before retry. Network timeout retries use a short fixed delay (fast failover);
+// 429 rate-limit retries use exponential backoff.
+function retryDelay(err: unknown, attempt: number): number {
+  const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
+  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return 1000;
+  return 1500 * attempt;
+}
+
+function maxAttempts(err: unknown, defaultMax: number): number {
+  const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
+  // Network timeouts already cost ~32 s each — cap at 2 attempts (1 retry) for fast failover.
+  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return 2;
+  return defaultMax;
+}
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (!isTransientError(err) || attempt === maxAttempts) throw err;
-      await new Promise((r) => setTimeout(r, delayMs * attempt));
+      const max = maxAttempts(err, attempts);
+      if (!isTransientError(err) || attempt >= max) throw err;
+      await new Promise((r) => setTimeout(r, retryDelay(err, attempt)));
     }
   }
   throw lastErr;
@@ -143,6 +163,22 @@ async function collectStreamAsMessage(
   return messageBase;
 }
 
+// Normalize the `system` field which can be either a plain string or an array of
+// Anthropic content blocks (e.g. [{type:"text", text:"..."}]).
+// Returns a plain string suitable for forwarding to OpenAI.
+function extractSystemText(raw: unknown): string | undefined {
+  if (!raw) return undefined;
+  if (typeof raw === "string") return raw || undefined;
+  if (Array.isArray(raw)) {
+    const text = (raw as Array<{ type: string; text?: string }>)
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("\n");
+    return text || undefined;
+  }
+  return undefined;
+}
+
 async function handleAnthropicRoute(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
   let messages = (body["messages"] as AnthropicMessage[]) ?? [];
   const maxTokens = (body["max_tokens"] as number) ?? 16000;
@@ -158,6 +194,28 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
     req.log.warn({ model }, "Stripped trailing assistant message (prefill not supported on Vertex AI)");
     messages = messages.slice(0, -1);
   }
+
+  // Thinking block signatures are cryptographically bound to the specific Vertex AI
+  // orchestrator node that generated them. When Replit AI Integration fails over to
+  // a different node (e.g. wendcc1 → api-orchestrator), the receiving node rejects
+  // signatures it didn't issue, returning 400 "Invalid `signature` in `thinking` block".
+  // Additionally, thinking blocks generated before our signature-capture fix have no
+  // signature field at all, which also triggers the same 400.
+  // Strip all thinking blocks from conversation history before forwarding to avoid this.
+  // The signature_delta capture in collectStreamAsMessage still ensures the *current*
+  // response returned to the client has correct signatures for display purposes.
+  messages = messages.map((msg) => {
+    if (msg.role !== "assistant") return msg;
+    const content = msg.content;
+    if (!Array.isArray(content)) return msg;
+    const filtered = content.filter(
+      (block: unknown) => (block as Record<string, unknown>)["type"] !== "thinking"
+    );
+    if (filtered.length === content.length) return msg;
+    req.log.debug({ model, removed: content.length - filtered.length },
+      "Stripped thinking blocks from assistant history (cross-node signature incompatibility)");
+    return { ...msg, content: filtered };
+  });
 
   const baseParams: Record<string, unknown> = {
     model,
@@ -244,13 +302,14 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
 async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
   const messages = (body["messages"] as { role: "user" | "assistant"; content: string }[]) ?? [];
   const maxTokens = (body["max_tokens"] as number) ?? 16000;
-  const system = body["system"] as string | undefined;
+  // system can be a plain string or an array of Anthropic content blocks
+  const systemText = extractSystemText(body["system"]);
   const temperature = body["temperature"] as number | undefined;
   const stream = body["stream"] === true;
   const reasoningEffort = body["reasoning_effort"] as ReasoningEffort | undefined;
 
   const openaiMessages: { role: "system" | "user" | "assistant"; content: string }[] = [];
-  if (system) openaiMessages.push({ role: "system", content: system });
+  if (systemText) openaiMessages.push({ role: "system", content: systemText });
   for (const m of messages) openaiMessages.push({ role: m.role, content: m.content });
 
   const messageId = `msg_proxy_${Date.now()}`;
@@ -277,7 +336,6 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
         },
       };
       res.write(`event: message_start\ndata: ${JSON.stringify(startEvent)}\n\n`);
-      res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })}\n\n`);
       res.write(`event: ping\ndata: ${JSON.stringify({ type: "ping" })}\n\n`);
 
       const completionStream = await openai.chat.completions.create({
@@ -288,36 +346,57 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
 
       let outputTokens = 0;
       let stopReason = "end_turn";
-      let reasoningBuffer = "";
-      let reasoningBlockStarted = false;
+      let thinkingBlockOpen = false;
+      let textBlockOpen = false;
+      let textBlockIndex = 0;
+      let hasThinking = false;
 
       for await (const chunk of completionStream) {
         const delta = chunk.choices[0]?.delta as Record<string, unknown> | undefined;
         const reasoningContent = delta?.["reasoning_content"] as string | undefined;
+        const content = delta?.["content"] as string | undefined;
+
         if (reasoningContent) {
-          if (!reasoningBlockStarted) {
-            reasoningBlockStarted = true;
+          if (!thinkingBlockOpen) {
+            thinkingBlockOpen = true;
+            hasThinking = true;
             res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } })}\n\n`);
           }
-          reasoningBuffer += reasoningContent;
           res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: reasoningContent } })}\n\n`);
         }
-        const content = delta?.["content"] as string | undefined;
+
         if (content) {
-          if (reasoningBlockStarted) {
+          if (thinkingBlockOpen) {
             res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
-            res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } })}\n\n`);
-            reasoningBlockStarted = false;
+            thinkingBlockOpen = false;
+          }
+          if (!textBlockOpen) {
+            textBlockIndex = hasThinking ? 1 : 0;
+            textBlockOpen = true;
+            res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: textBlockIndex, content_block: { type: "text", text: "" } })}\n\n`);
           }
           outputTokens += 1;
-          res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: reasoningBuffer ? 1 : 0, delta: { type: "text_delta", text: content } })}\n\n`);
+          res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: textBlockIndex, delta: { type: "text_delta", text: content } })}\n\n`);
         }
+
         const finishReason = chunk.choices[0]?.finish_reason;
         if (finishReason) stopReason = finishReason === "stop" ? "end_turn" : finishReason;
         if (chunk.usage) outputTokens = chunk.usage.completion_tokens ?? outputTokens;
       }
 
-      res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: reasoningBuffer ? 1 : 0 })}\n\n`);
+      // Close any still-open content blocks
+      if (thinkingBlockOpen) {
+        res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
+      }
+      if (textBlockOpen) {
+        res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: textBlockIndex })}\n\n`);
+      } else {
+        // Guarantee at least one text block so clients always get a valid message structure
+        const emptyIdx = hasThinking ? 1 : 0;
+        res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: emptyIdx, content_block: { type: "text", text: "" } })}\n\n`);
+        res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: emptyIdx })}\n\n`);
+      }
+
       res.write(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } })}\n\n`);
       res.write(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
       res.end();
@@ -349,7 +428,10 @@ async function handleOpenAIViaAnthropicFormat(model: string, body: Record<string
   } catch (err: unknown) {
     req.log.error({ err }, "OpenAI via Anthropic-format error");
     if (!res.headersSent) {
-      res.status(500).json({ type: "error", error: { type: "api_error", message: "Upstream OpenAI error" } });
+      const errObj = err as Record<string, unknown>;
+      const status = (errObj["status"] as number) ?? 500;
+      const upstreamMsg = (errObj["message"] as string) ?? "Upstream OpenAI error";
+      res.status(status).json({ type: "error", error: { type: "api_error", message: upstreamMsg } });
     } else {
       res.end();
     }

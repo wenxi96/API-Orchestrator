@@ -9,6 +9,7 @@ const WARMUP_MODELS = [
   "claude-sonnet-4-6",
   "claude-opus-4-5",
   "claude-opus-4-6",
+  "claude-opus-4-7",
 ];
 
 // Ping every 25 minutes — well within Vertex AI's auth token window.
