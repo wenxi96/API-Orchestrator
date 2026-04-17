@@ -38,18 +38,38 @@ function isTransientError(err: unknown): boolean {
   // Retrying here is futile — pass it through immediately so the client's own
   // backoff (e.g. Claude Code's 10-attempt retry) can handle it properly.
   if (msg.includes("auth_unavailable")) return false;
-  return status === 429;
+  if (status === 429) return true;
+  // Network-level timeouts from Replit AI Integration orchestrator nodes (e.g. wendcc1).
+  // Retrying causes the Integration to re-route through a different healthy node.
+  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return true;
+  return false;
 }
 
-async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, delayMs = 1500): Promise<T> {
+// Delay before retry. Network timeout retries use a short fixed delay (fast failover);
+// 429 rate-limit retries use exponential backoff.
+function retryDelay(err: unknown, attempt: number): number {
+  const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
+  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return 1000;
+  return 1500 * attempt;
+}
+
+function maxAttempts(err: unknown, defaultMax: number): number {
+  const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
+  // Network timeouts already cost ~32 s each — cap at 2 attempts (1 retry) for fast failover.
+  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return 2;
+  return defaultMax;
+}
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (!isTransientError(err) || attempt === maxAttempts) throw err;
-      await new Promise((r) => setTimeout(r, delayMs * attempt));
+      const max = maxAttempts(err, attempts);
+      if (!isTransientError(err) || attempt >= max) throw err;
+      await new Promise((r) => setTimeout(r, retryDelay(err, attempt)));
     }
   }
   throw lastErr;
