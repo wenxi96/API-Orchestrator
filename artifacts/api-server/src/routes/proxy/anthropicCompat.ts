@@ -159,6 +159,28 @@ async function handleAnthropicRoute(model: string, body: Record<string, unknown>
     messages = messages.slice(0, -1);
   }
 
+  // Thinking block signatures are cryptographically bound to the specific Vertex AI
+  // orchestrator node that generated them. When Replit AI Integration fails over to
+  // a different node (e.g. wendcc1 → api-orchestrator), the receiving node rejects
+  // signatures it didn't issue, returning 400 "Invalid `signature` in `thinking` block".
+  // Additionally, thinking blocks generated before our signature-capture fix have no
+  // signature field at all, which also triggers the same 400.
+  // Strip all thinking blocks from conversation history before forwarding to avoid this.
+  // The signature_delta capture in collectStreamAsMessage still ensures the *current*
+  // response returned to the client has correct signatures for display purposes.
+  messages = messages.map((msg) => {
+    if (msg.role !== "assistant") return msg;
+    const content = msg.content;
+    if (!Array.isArray(content)) return msg;
+    const filtered = content.filter(
+      (block: unknown) => (block as Record<string, unknown>)["type"] !== "thinking"
+    );
+    if (filtered.length === content.length) return msg;
+    req.log.debug({ model, removed: content.length - filtered.length },
+      "Stripped thinking blocks from assistant history (cross-node signature incompatibility)");
+    return { ...msg, content: filtered };
+  });
+
   const baseParams: Record<string, unknown> = {
     model,
     max_tokens: maxTokens,
