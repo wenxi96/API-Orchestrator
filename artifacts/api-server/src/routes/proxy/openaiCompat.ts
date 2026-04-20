@@ -2,6 +2,14 @@ import { Router, type IRouter, Request, Response } from "express";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { proxyAuth } from "../../middlewares/proxyAuth.js";
+import {
+  normalizeModel,
+  parseBetaHeaders,
+  generateId,
+  withRetry,
+  mapAnthropicStopToOpenAI,
+  abortOnClientClose,
+} from "../../lib/upstream.js";
 
 const router: IRouter = Router();
 
@@ -34,63 +42,18 @@ router.get("/models", (_req: Request, res: Response) => {
 type OpenAIMessage = { role: string; content: string | null };
 type ReasoningEffort = "low" | "medium" | "high";
 
-function normalizeModel(model: string): string {
-  return model.replace(/-\d{8}$/, "");
-}
-
 function isClaudeModel(model: string): boolean {
   return model.startsWith("claude");
 }
 
 function isReasoningModel(model: string): boolean {
-  return model.startsWith("o3") || model.startsWith("o4") || model === "gpt-5.4" || model.startsWith("gpt-5.4-");
+  return model.startsWith("o3") || model.startsWith("o4")
+    || model === "gpt-5.4" || model.startsWith("gpt-5.4-");
 }
 
-function parseBetaHeaders(req: Request): string[] {
-  const raw = req.headers["anthropic-beta"];
-  if (!raw) return [];
-  const value = Array.isArray(raw) ? raw.join(",") : raw;
-  return value.split(",").map((s) => s.trim()).filter(Boolean);
-}
-
-function isTransientError(err: unknown): boolean {
-  const e = err as Record<string, unknown>;
-  const msg = (e["message"] as string) ?? "";
-  const status = e["status"] as number | undefined;
-  if (msg.includes("auth_unavailable")) return false;
-  if (status === 429) return true;
-  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return true;
-  return false;
-}
-
-function retryDelay(err: unknown, attempt: number): number {
-  const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
-  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return 1000;
-  return 1500 * attempt;
-}
-
-function maxRetryAttempts(err: unknown, defaultMax: number): number {
-  const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
-  if (msg.includes("i/o timeout") || msg.includes("dial tcp")) return 2;
-  return defaultMax;
-}
-
-async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      const max = maxRetryAttempts(err, attempts);
-      if (!isTransientError(err) || attempt >= max) throw err;
-      await new Promise((r) => setTimeout(r, retryDelay(err, attempt)));
-    }
-  }
-  throw lastErr;
-}
-
-async function handleOpenAIRoute(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
+async function handleOpenAIRoute(
+  model: string, body: Record<string, unknown>, req: Request, res: Response,
+): Promise<void> {
   const messages = (body["messages"] as OpenAIMessage[]) ?? [];
   const stream = body["stream"] === true;
   const temperature = body["temperature"] as number | undefined;
@@ -110,6 +73,9 @@ async function handleOpenAIRoute(model: string, body: Record<string, unknown>, r
     ...(reasoningEffort !== undefined && isReasoning ? { reasoning_effort: reasoningEffort } : {}),
   };
 
+  const abort = abortOnClientClose(req);
+  const reqOpts = { signal: abort.signal };
+
   try {
     if (stream) {
       res.setHeader("Content-Type", "text/event-stream");
@@ -118,15 +84,14 @@ async function handleOpenAIRoute(model: string, body: Record<string, unknown>, r
 
       const completionStream = await withRetry(() =>
         openai.chat.completions.create({
-          model,
-          messages: chatMessages,
-          stream: true,
+          model, messages: chatMessages, stream: true,
           stream_options: { include_usage: true },
           ...extraParams,
-        } as Parameters<typeof openai.chat.completions.create>[0])
+        } as Parameters<typeof openai.chat.completions.create>[0], reqOpts)
       );
 
       for await (const chunk of completionStream) {
+        if (abort.signal.aborted) break;
         res.write(`data: ${JSON.stringify(chunk)}\n\n`);
       }
       res.write("data: [DONE]\n\n");
@@ -134,15 +99,16 @@ async function handleOpenAIRoute(model: string, body: Record<string, unknown>, r
     } else {
       const completion = await withRetry(() =>
         openai.chat.completions.create({
-          model,
-          messages: chatMessages,
-          stream: false,
-          ...extraParams,
-        } as Parameters<typeof openai.chat.completions.create>[0])
+          model, messages: chatMessages, stream: false, ...extraParams,
+        } as Parameters<typeof openai.chat.completions.create>[0], reqOpts)
       );
       res.json(completion);
     }
   } catch (err: unknown) {
+    if (abort.signal.aborted) {
+      req.log.info({ model }, "Client disconnected — upstream aborted");
+      return;
+    }
     req.log.error({ err }, "OpenAI completion error");
     if (!res.headersSent) {
       const errObj = err as Record<string, unknown>;
@@ -157,20 +123,19 @@ async function handleOpenAIRoute(model: string, body: Record<string, unknown>, r
 
 type AnthropicThinking = { type: "enabled"; budget_tokens: number } | { type: "disabled" };
 
-async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, unknown>, req: Request, res: Response): Promise<void> {
+async function handleClaudeViaOpenAIFormat(
+  model: string, body: Record<string, unknown>, req: Request, res: Response,
+): Promise<void> {
   const messages = (body["messages"] as OpenAIMessage[]) ?? [];
   const stream = body["stream"] === true;
   const temperature = body["temperature"] as number | undefined;
   const maxTokens = (body["max_completion_tokens"] ?? body["max_tokens"]) as number | undefined;
   const thinking = body["thinking"] as AnthropicThinking | undefined;
   const betas = parseBetaHeaders(req);
-  const requestOptions = betas.length > 0 ? { headers: { "anthropic-beta": betas.join(",") } } : {};
 
   const systemMessages = messages.filter((m) => m.role === "system");
-  const systemPrompt = systemMessages.map((m) => m.content ?? "").join("\n");
+  const systemPrompt = systemMessages.map((m) => m.content ?? "").join("\n\n");
 
-  // Build Anthropic-format messages from the non-system turns, stripping any
-  // thinking blocks that may be in assistant history (cross-node signature issue).
   let anthropicMessages = messages
     .filter((m) => m.role !== "system")
     .map((m) => ({
@@ -178,21 +143,24 @@ async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, u
       content: m.content ?? "",
     }));
 
-  // Strip trailing assistant messages (Vertex AI does not support prefill)
+  // Vertex AI does not support assistant prefill
   while (anthropicMessages.length > 0 && anthropicMessages[anthropicMessages.length - 1]?.role === "assistant") {
     anthropicMessages = anthropicMessages.slice(0, -1);
   }
 
-  const requestId = `chatcmpl-proxy-${Date.now()}`;
+  const requestId = generateId("chatcmpl");
   const created = Math.floor(Date.now() / 1000);
 
   const baseParams = {
-    model,
-    max_tokens: maxTokens ?? 16000,
+    model, max_tokens: maxTokens ?? 16000,
     messages: anthropicMessages,
     ...(systemPrompt ? { system: systemPrompt } : {}),
     ...(thinking ? { thinking } : temperature !== undefined ? { temperature } : {}),
   };
+
+  const abort = abortOnClientClose(req);
+  const requestOptions: Record<string, unknown> = { signal: abort.signal };
+  if (betas.length > 0) requestOptions["headers"] = { "anthropic-beta": betas.join(",") };
 
   try {
     if (stream) {
@@ -207,11 +175,11 @@ async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, u
         )
       );
 
-      let thinkingBuffer = "";
       let inputTokens = 0;
       let outputTokens = 0;
 
       for await (const event of (anthropicStream as AsyncIterable<Record<string, unknown>>)) {
+        if (abort.signal.aborted) break;
         const type = event["type"] as string;
 
         if (type === "message_start") {
@@ -223,11 +191,9 @@ async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, u
           const deltaType = delta["type"] as string;
 
           if (deltaType === "thinking_delta") {
-            const thinking = delta["thinking"] as string;
-            thinkingBuffer += thinking;
             const chunk = {
               id: requestId, object: "chat.completion.chunk", created, model,
-              choices: [{ index: 0, delta: { reasoning_content: thinking }, finish_reason: null }],
+              choices: [{ index: 0, delta: { reasoning_content: delta["thinking"] as string }, finish_reason: null }],
             };
             res.write(`data: ${JSON.stringify(chunk)}\n\n`);
           } else if (deltaType === "text_delta") {
@@ -242,10 +208,9 @@ async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, u
           const usage = event["usage"] as Record<string, unknown> | undefined;
           outputTokens = (usage?.["output_tokens"] as number) ?? outputTokens;
           if (delta["stop_reason"]) {
-            const stopReason = delta["stop_reason"] === "end_turn" ? "stop" : delta["stop_reason"] as string;
             const chunk = {
               id: requestId, object: "chat.completion.chunk", created, model,
-              choices: [{ index: 0, delta: {}, finish_reason: stopReason }],
+              choices: [{ index: 0, delta: {}, finish_reason: mapAnthropicStopToOpenAI(delta["stop_reason"] as string) }],
               usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: inputTokens + outputTokens },
             };
             res.write(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -268,10 +233,7 @@ async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, u
       const text = textBlock && textBlock.type === "text" ? textBlock.text : "";
 
       res.json({
-        id: requestId,
-        object: "chat.completion",
-        created,
-        model,
+        id: requestId, object: "chat.completion", created, model,
         choices: [{
           index: 0,
           message: {
@@ -279,7 +241,7 @@ async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, u
             content: text,
             ...(thinkingText ? { reasoning_content: thinkingText } : {}),
           },
-          finish_reason: message.stop_reason === "end_turn" ? "stop" : message.stop_reason,
+          finish_reason: mapAnthropicStopToOpenAI(message.stop_reason),
         }],
         usage: {
           prompt_tokens: message.usage.input_tokens,
@@ -289,6 +251,10 @@ async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, u
       });
     }
   } catch (err: unknown) {
+    if (abort.signal.aborted) {
+      req.log.info({ model }, "Client disconnected — upstream aborted");
+      return;
+    }
     req.log.error({ err }, "Anthropic via OpenAI-format error");
     if (!res.headersSent) {
       const errObj = err as Record<string, unknown>;
@@ -304,8 +270,6 @@ async function handleClaudeViaOpenAIFormat(model: string, body: Record<string, u
 router.post("/chat/completions", async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
   const originalModel = (body["model"] as string) || "gpt-5.2";
-  // Normalize only for routing decision — the original model name (with any
-  // date suffix) is forwarded to the upstream API.
   const routingModel = normalizeModel(originalModel);
 
   if (isClaudeModel(routingModel)) {
