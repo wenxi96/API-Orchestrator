@@ -35,6 +35,82 @@ export function isTransientError(err: unknown): boolean {
   return false;
 }
 
+// ── auth_unavailable detection & model fallback ───────────────────────────────
+// Replit's managed Claude integration can enter a cooldown ("auth_unavailable")
+// when a specific model gets rate-limited. We auto-fallback to a related model
+// and surface a friendly bilingual message if the entire chain is exhausted.
+
+export function isAuthUnavailableError(err: unknown): boolean {
+  const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
+  return msg.includes("auth_unavailable");
+}
+
+// Models to try in order when the primary model returns auth_unavailable.
+// Picked to preserve capability tier when possible (opus → opus → sonnet).
+// Lookups are normalized (date suffix stripped) so aliases like
+// `claude-sonnet-4-5-20251001` resolve to the `claude-sonnet-4-5` chain.
+const MODEL_FALLBACK_CHAIN_RAW: Record<string, string[]> = {
+  "claude-opus-4-7": ["claude-opus-4-6", "claude-opus-4-5", "claude-sonnet-4-6"],
+  "claude-opus-4-6": ["claude-opus-4-5", "claude-sonnet-4-6", "claude-sonnet-4-5"],
+  "claude-opus-4-5": ["claude-sonnet-4-6", "claude-sonnet-4-5"],
+  "claude-sonnet-4-6": ["claude-sonnet-4-5", "claude-haiku-4-5-20251001"],
+  "claude-sonnet-4-5": ["claude-haiku-4-5-20251001"],
+};
+
+export const MODEL_FALLBACK_CHAIN: Record<string, string[]> = MODEL_FALLBACK_CHAIN_RAW;
+
+export function getFallbackChain(model: string): string[] {
+  return MODEL_FALLBACK_CHAIN_RAW[normalizeModel(model)] ?? [];
+}
+
+// Try `fn` with the original model; on auth_unavailable, walk the fallback chain.
+// Returns the result plus which model actually served the request.
+export async function withModelFallback<T>(
+  originalModel: string,
+  fn: (model: string) => Promise<T>,
+  onFallback?: (failed: string, next: string) => void,
+): Promise<{ result: T; usedModel: string }> {
+  const chain = [originalModel, ...getFallbackChain(originalModel)];
+  let lastErr: unknown;
+  for (let i = 0; i < chain.length; i++) {
+    const model = chain[i] as string;
+    try {
+      const result = await fn(model);
+      return { result, usedModel: model };
+    } catch (err) {
+      lastErr = err;
+      if (!isAuthUnavailableError(err)) throw err;
+      const next = chain[i + 1];
+      if (next && onFallback) onFallback(model, next);
+    }
+  }
+  throw lastErr;
+}
+
+// Friendly bilingual message for users when the upstream Claude auth is in
+// cooldown. Includes which models were tried so the user knows what happened.
+export function formatAuthUnavailableMessage(
+  originalModel: string,
+  triedModels: string[],
+): string {
+  const triedList = triedModels.join(", ");
+  const tier = originalModel.includes("opus") ? "claude-sonnet-4-6 / claude-haiku-4-5"
+    : originalModel.includes("sonnet") ? "claude-haiku-4-5"
+    : "其他较小的模型";
+  return (
+    `模型 \`${originalModel}\` 当前不可用：上游 Claude 集成认证处于冷却状态（rate-limited / cooldown）。\n` +
+    `已自动尝试备用模型 [${triedList}]，但全部因相同原因失败。\n\n` +
+    `建议：\n` +
+    `  1. 等待数分钟后重试（冷却通常会自动恢复）\n` +
+    `  2. 手动切换到 ${tier}\n` +
+    `  3. 减少单次请求的上下文长度，避免触发限流\n\n` +
+    `--- English ---\n` +
+    `Model \`${originalModel}\` is currently unavailable: upstream Claude integration auth is in cooldown (rate-limited).\n` +
+    `Auto-fallback chain [${triedList}] all failed with the same reason.\n` +
+    `Please wait a few minutes and retry, or switch to a smaller-tier model.`
+  );
+}
+
 function retryDelay(err: unknown, attempt: number): number {
   const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
   if (isNetworkError(msg)) return 1000;

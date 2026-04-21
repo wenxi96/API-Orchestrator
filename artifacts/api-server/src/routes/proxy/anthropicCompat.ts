@@ -7,6 +7,10 @@ import {
   parseBetaHeaders,
   generateId,
   withRetry,
+  withModelFallback,
+  getFallbackChain,
+  isAuthUnavailableError,
+  formatAuthUnavailableMessage,
   mapOpenAIFinishToAnthropic,
   abortOnClientClose,
 } from "../../lib/upstream.js";
@@ -148,8 +152,10 @@ async function handleAnthropicRoute(
     return filtered.length === content.length ? msg : { ...msg, content: filtered };
   });
 
-  const baseParams: Record<string, unknown> = {
-    model, max_tokens: maxTokens, messages,
+  // Build params with a substitutable model — required so model fallback can
+  // swap in a different model without rebuilding the entire param object.
+  const buildParams = (m: string): Record<string, unknown> => ({
+    model: m, max_tokens: maxTokens, messages,
     ...(system !== undefined ? { system } : {}),
     ...(thinking ? { thinking } : temperature !== undefined ? { temperature } : {}),
     ...(body["stop_sequences"] !== undefined ? { stop_sequences: body["stop_sequences"] } : {}),
@@ -158,25 +164,44 @@ async function handleAnthropicRoute(
     ...(body["metadata"] !== undefined ? { metadata: body["metadata"] } : {}),
     ...(body["tools"] !== undefined ? { tools: body["tools"] } : {}),
     ...(body["tool_choice"] !== undefined ? { tool_choice: body["tool_choice"] } : {}),
-  };
+  });
 
   // Cancel upstream when client disconnects (saves tokens on broken streams).
   const abort = abortOnClientClose(req);
   const requestOptions: Record<string, unknown> = { signal: abort.signal };
   if (betas.length > 0) requestOptions["headers"] = { "anthropic-beta": betas.join(",") };
 
+  const onFallback = (failed: string, next: string): void => {
+    req.log.warn({ originalModel: model, failed, next },
+      "auth_unavailable — auto-falling back to next model in chain");
+  };
+
   try {
     if (stream) {
-      const eventStream = await withRetry(() =>
-        anthropic.messages.create(
-          { ...baseParams, stream: true } as Parameters<typeof anthropic.messages.create>[0],
-          requestOptions,
-        )
+      // Set headers BEFORE attempting upstream — so on fallback exhaustion
+      // we can still write a friendly error event without violating SSE.
+      // Actually keep headers unset until we have a successful upstream call,
+      // because fallback may take multiple attempts and we want to be able to
+      // return JSON 503 if all fail.
+      const { result: eventStream, usedModel } = await withModelFallback(model,
+        (m) => withRetry(() =>
+          anthropic.messages.create(
+            { ...buildParams(m), stream: true } as Parameters<typeof anthropic.messages.create>[0],
+            requestOptions,
+          )
+        ),
+        onFallback,
       );
+
+      if (usedModel !== model) {
+        req.log.info({ originalModel: model, usedModel }, "Stream served by fallback model");
+      }
 
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
+      // Custom header so clients can tell when a fallback was used.
+      if (usedModel !== model) res.setHeader("X-Proxy-Fallback-Model", usedModel);
 
       for await (const event of (eventStream as AsyncIterable<{ type: string }>)) {
         if (abort.signal.aborted) break;
@@ -184,23 +209,30 @@ async function handleAnthropicRoute(
       }
       res.end();
     } else {
-      let message: Record<string, unknown>;
-      if (isLongRunningRequest(betas)) {
-        req.log.info({ model, betas }, "Long-running betas — using stream-and-collect");
-        message = await withRetry(() => collectStreamAsMessage(baseParams, requestOptions));
-      } else {
+      const callUpstream = async (m: string): Promise<Record<string, unknown>> => {
+        const params = buildParams(m);
+        if (isLongRunningRequest(betas)) {
+          req.log.info({ model: m, betas }, "Long-running betas — using stream-and-collect");
+          return await withRetry(() => collectStreamAsMessage(params, requestOptions));
+        }
         try {
-          message = await withRetry(() =>
+          return await withRetry(() =>
             anthropic.messages.create(
-              baseParams as Parameters<typeof anthropic.messages.create>[0],
+              params as Parameters<typeof anthropic.messages.create>[0],
               requestOptions,
             )
           ) as unknown as Record<string, unknown>;
         } catch (firstErr: unknown) {
           if (!isStreamingRequiredError(firstErr)) throw firstErr;
-          req.log.warn({ model }, "Upstream requires streaming — fallback to stream-and-collect");
-          message = await withRetry(() => collectStreamAsMessage(baseParams, requestOptions));
+          req.log.warn({ model: m }, "Upstream requires streaming — fallback to stream-and-collect");
+          return await withRetry(() => collectStreamAsMessage(params, requestOptions));
         }
+      };
+
+      const { result: message, usedModel } = await withModelFallback(model, callUpstream, onFallback);
+      if (usedModel !== model) {
+        req.log.info({ originalModel: model, usedModel }, "Request served by fallback model");
+        res.setHeader("X-Proxy-Fallback-Model", usedModel);
       }
       res.json(message);
     }
@@ -209,9 +241,27 @@ async function handleAnthropicRoute(
       req.log.info({ model }, "Client disconnected — upstream aborted");
       return;
     }
-    req.log.error({ err }, "Anthropic messages error");
+    req.log.error({ err, originalModel: model }, "Anthropic messages error");
     if (!res.headersSent) {
       const errObj = err as Record<string, unknown>;
+
+      // Friendly message when the entire fallback chain exhausted on auth_unavailable.
+      if (isAuthUnavailableError(err)) {
+        const tried = [model, ...getFallbackChain(model)];
+        const friendly = formatAuthUnavailableMessage(model, tried);
+        res.status(503).json({
+          type: "error",
+          error: {
+            type: "overloaded_error",
+            message: friendly,
+            code: "upstream_auth_cooldown",
+            original_model: model,
+            tried_models: tried,
+          },
+        });
+        return;
+      }
+
       const status = (errObj["status"] as number) ?? 500;
       const upstreamMsg = (errObj["message"] as string) ?? "Upstream Anthropic error";
       res.status(status).json({ type: "error", error: { type: "api_error", message: upstreamMsg } });
