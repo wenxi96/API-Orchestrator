@@ -168,70 +168,88 @@ async function handleAnthropicRoute(
 
   // Cancel upstream when client disconnects (saves tokens on broken streams).
   const abort = abortOnClientClose(req);
-  const requestOptions: Record<string, unknown> = { signal: abort.signal };
-  if (betas.length > 0) requestOptions["headers"] = { "anthropic-beta": betas.join(",") };
+  const baseHeaders = betas.length > 0 ? { "anthropic-beta": betas.join(",") } : undefined;
 
+  // Build per-attempt request options so each fallback attempt gets a fresh
+  // signal that doesn't carry abort state from prior attempts.
+  const buildReqOpts = (signal: AbortSignal): Record<string, unknown> => ({
+    signal,
+    ...(baseHeaders ? { headers: baseHeaders } : {}),
+  });
+
+  // Track fallback hops for a single summary log (less noise than per-hop warns).
+  const fallbackHops: Array<{ failed: string; next: string }> = [];
   const onFallback = (failed: string, next: string): void => {
-    req.log.warn({ originalModel: model, failed, next },
-      "auth_unavailable — auto-falling back to next model in chain");
+    fallbackHops.push({ failed, next });
   };
 
   try {
     if (stream) {
-      // Set headers BEFORE attempting upstream — so on fallback exhaustion
-      // we can still write a friendly error event without violating SSE.
-      // Actually keep headers unset until we have a successful upstream call,
-      // because fallback may take multiple attempts and we want to be able to
-      // return JSON 503 if all fail.
+      // Headers stay unset until upstream responds successfully — that way
+      // fallback exhaustion can still return a JSON 529 cleanly.
       const { result: eventStream, usedModel } = await withModelFallback(model,
-        (m) => withRetry(() =>
+        (m, ctx) => withRetry(() =>
           anthropic.messages.create(
             { ...buildParams(m), stream: true } as Parameters<typeof anthropic.messages.create>[0],
-            requestOptions,
+            buildReqOpts(ctx.signal),
           )
         ),
-        onFallback,
+        { parentSignal: abort.signal, onFallback },
       );
 
       if (usedModel !== model) {
-        req.log.info({ originalModel: model, usedModel }, "Stream served by fallback model");
+        req.log.info({ originalModel: model, usedModel, hops: fallbackHops },
+          "Stream served by fallback model after auth_unavailable");
       }
 
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
-      // Custom header so clients can tell when a fallback was used.
       if (usedModel !== model) res.setHeader("X-Proxy-Fallback-Model", usedModel);
 
-      for await (const event of (eventStream as AsyncIterable<{ type: string }>)) {
-        if (abort.signal.aborted) break;
-        res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      const iter = eventStream as AsyncIterable<{ type: string }> & {
+        return?: () => Promise<unknown>;
+      };
+      try {
+        for await (const event of iter) {
+          if (abort.signal.aborted) break;
+          res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+        }
+      } finally {
+        // Explicitly close the upstream iterator on abort/early-break so the
+        // upstream connection isn't left dangling.
+        if (abort.signal.aborted && typeof iter.return === "function") {
+          try { await iter.return(); } catch { /* best-effort */ }
+        }
       }
       res.end();
     } else {
-      const callUpstream = async (m: string): Promise<Record<string, unknown>> => {
+      const callUpstream = async (m: string, ctx: { signal: AbortSignal }): Promise<Record<string, unknown>> => {
         const params = buildParams(m);
+        const reqOpts = buildReqOpts(ctx.signal);
         if (isLongRunningRequest(betas)) {
           req.log.info({ model: m, betas }, "Long-running betas — using stream-and-collect");
-          return await withRetry(() => collectStreamAsMessage(params, requestOptions));
+          return await withRetry(() => collectStreamAsMessage(params, reqOpts));
         }
         try {
           return await withRetry(() =>
             anthropic.messages.create(
               params as Parameters<typeof anthropic.messages.create>[0],
-              requestOptions,
+              reqOpts,
             )
           ) as unknown as Record<string, unknown>;
         } catch (firstErr: unknown) {
           if (!isStreamingRequiredError(firstErr)) throw firstErr;
           req.log.warn({ model: m }, "Upstream requires streaming — fallback to stream-and-collect");
-          return await withRetry(() => collectStreamAsMessage(params, requestOptions));
+          return await withRetry(() => collectStreamAsMessage(params, reqOpts));
         }
       };
 
-      const { result: message, usedModel } = await withModelFallback(model, callUpstream, onFallback);
+      const { result: message, usedModel } = await withModelFallback(model, callUpstream,
+        { parentSignal: abort.signal, onFallback });
       if (usedModel !== model) {
-        req.log.info({ originalModel: model, usedModel }, "Request served by fallback model");
+        req.log.info({ originalModel: model, usedModel, hops: fallbackHops },
+          "Request served by fallback model after auth_unavailable");
         res.setHeader("X-Proxy-Fallback-Model", usedModel);
       }
       res.json(message);
@@ -241,22 +259,26 @@ async function handleAnthropicRoute(
       req.log.info({ model }, "Client disconnected — upstream aborted");
       return;
     }
-    req.log.error({ err, originalModel: model }, "Anthropic messages error");
+    req.log.error({ err, originalModel: model, fallbackHops }, "Anthropic messages error");
     if (!res.headersSent) {
       const errObj = err as Record<string, unknown>;
 
       // Friendly message when the entire fallback chain exhausted on auth_unavailable.
+      // Use HTTP 529 — Anthropic's "overloaded" status — rather than 503, so
+      // Anthropic SDKs / Claude CLI apply their existing overload-aware retry/UI.
       if (isAuthUnavailableError(err)) {
-        const tried = [model, ...getFallbackChain(model)];
-        const friendly = formatAuthUnavailableMessage(model, tried);
-        res.status(503).json({
+        const triedModels = [normalizeModel(model), ...getFallbackChain(model)];
+        const friendly = formatAuthUnavailableMessage(normalizeModel(model), triedModels);
+        res.status(529).json({
           type: "error",
           error: {
             type: "overloaded_error",
             message: friendly,
-            code: "upstream_auth_cooldown",
-            original_model: model,
-            tried_models: tried,
+            details: {
+              code: "upstream_auth_cooldown",
+              original_model: model,
+              fallback_attempted: triedModels.length > 1,
+            },
           },
         });
         return;

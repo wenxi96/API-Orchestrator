@@ -40,9 +40,40 @@ export function isTransientError(err: unknown): boolean {
 // when a specific model gets rate-limited. We auto-fallback to a related model
 // and surface a friendly bilingual message if the entire chain is exhausted.
 
+// Structured detection: upstream may surface auth_unavailable through any of
+// `message`, `code`, `error.code`, `error.type`, or HTTP status hints. Pure
+// string matching on `message` misses errors that put the marker elsewhere.
 export function isAuthUnavailableError(err: unknown): boolean {
-  const msg = ((err as Record<string, unknown>)["message"] as string) ?? "";
-  return msg.includes("auth_unavailable");
+  if (!err || typeof err !== "object") return false;
+  const e = err as Record<string, unknown>;
+  const inner = (e["error"] as Record<string, unknown> | undefined) ?? {};
+  const fields = [
+    e["message"],
+    e["code"],
+    e["type"],
+    inner["message"],
+    inner["code"],
+    inner["type"],
+  ];
+  for (const f of fields) {
+    if (typeof f === "string" && f.includes("auth_unavailable")) return true;
+  }
+  // Some SDKs nest the original payload under `response.data` / `cause`.
+  const response = e["response"] as Record<string, unknown> | undefined;
+  if (response) {
+    const data = response["data"];
+    if (typeof data === "string" && data.includes("auth_unavailable")) return true;
+    if (data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      const dErr = (d["error"] as Record<string, unknown> | undefined) ?? {};
+      for (const f of [d["message"], d["code"], dErr["message"], dErr["code"], dErr["type"]]) {
+        if (typeof f === "string" && f.includes("auth_unavailable")) return true;
+      }
+    }
+  }
+  const cause = e["cause"];
+  if (cause && cause !== err) return isAuthUnavailableError(cause);
+  return false;
 }
 
 // Models to try in order when the primary model returns auth_unavailable.
@@ -63,25 +94,60 @@ export function getFallbackChain(model: string): string[] {
   return MODEL_FALLBACK_CHAIN_RAW[normalizeModel(model)] ?? [];
 }
 
-// Try `fn` with the original model; on auth_unavailable, walk the fallback chain.
-// Returns the result plus which model actually served the request.
+export interface FallbackAttemptCtx {
+  /** Per-attempt signal: aborts if the client disconnects but never carries
+   *  abort state from a previous failed attempt. Use this for the upstream
+   *  SDK call so that one attempt's cleanup can't poison the next. */
+  signal: AbortSignal;
+  /** True if this is a fallback (i.e. not the originally requested model). */
+  isFallback: boolean;
+}
+
+/**
+ * Try `fn` with the original model; on auth_unavailable, walk the fallback chain.
+ * Each attempt receives a *fresh* AbortSignal linked to `parentSignal`, so abort
+ * state never bleeds between attempts. If `parentSignal` is aborted (client
+ * disconnect), the chain bails immediately and rethrows the last error.
+ */
 export async function withModelFallback<T>(
   originalModel: string,
-  fn: (model: string) => Promise<T>,
-  onFallback?: (failed: string, next: string) => void,
+  fn: (model: string, ctx: FallbackAttemptCtx) => Promise<T>,
+  options: {
+    parentSignal?: AbortSignal;
+    onFallback?: (failed: string, next: string) => void;
+  } = {},
 ): Promise<{ result: T; usedModel: string }> {
+  const { parentSignal, onFallback } = options;
   const chain = [originalModel, ...getFallbackChain(originalModel)];
   let lastErr: unknown;
+
   for (let i = 0; i < chain.length; i++) {
+    if (parentSignal?.aborted) {
+      throw lastErr ?? new Error("client aborted before fallback could complete");
+    }
     const model = chain[i] as string;
+
+    // Fresh controller per attempt, forwarded from parent if present.
+    const attemptController = new AbortController();
+    const onParentAbort = (): void => attemptController.abort();
+    if (parentSignal) {
+      if (parentSignal.aborted) attemptController.abort();
+      else parentSignal.addEventListener("abort", onParentAbort, { once: true });
+    }
+
     try {
-      const result = await fn(model);
+      const result = await fn(model, {
+        signal: attemptController.signal,
+        isFallback: i > 0,
+      });
       return { result, usedModel: model };
     } catch (err) {
       lastErr = err;
       if (!isAuthUnavailableError(err)) throw err;
       const next = chain[i + 1];
       if (next && onFallback) onFallback(model, next);
+    } finally {
+      if (parentSignal) parentSignal.removeEventListener("abort", onParentAbort);
     }
   }
   throw lastErr;
