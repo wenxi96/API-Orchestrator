@@ -47,6 +47,10 @@ export function isAuthUnavailableError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const e = err as Record<string, unknown>;
   const inner = (e["error"] as Record<string, unknown> | undefined) ?? {};
+  // Replit Integration proxy nests the marker as `{ error: { error: { message, type, code } } }`
+  // when the SDK parses the upstream JSON body and exposes it on `err.error`.
+  // Walk one level deeper as well so we catch that shape.
+  const innerInner = (inner["error"] as Record<string, unknown> | undefined) ?? {};
   const fields = [
     e["message"],
     e["code"],
@@ -54,6 +58,9 @@ export function isAuthUnavailableError(err: unknown): boolean {
     inner["message"],
     inner["code"],
     inner["type"],
+    innerInner["message"],
+    innerInner["code"],
+    innerInner["type"],
   ];
   for (const f of fields) {
     if (typeof f === "string" && f.includes("auth_unavailable")) return true;
